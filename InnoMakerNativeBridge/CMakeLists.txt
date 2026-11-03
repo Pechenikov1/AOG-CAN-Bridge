@@ -1,31 +1,29 @@
 cmake_minimum_required(VERSION 3.20)
-project(InnoMakerNativeBridge LANGUAGES CXX)
+project(InnoMakerNativeBridge CXX)
 
-if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(FATAL_ERROR "The InnoMaker wrapper currently supports Windows x64 only.")
-endif()
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-set(INNOMAKER_SDK_ROOT "" CACHE PATH "Path to the InnoMaker USB2CAN Windows SDK")
-if(NOT INNOMAKER_SDK_ROOT)
-    message(FATAL_ERROR "Set INNOMAKER_SDK_ROOT to the SDK folder containing Lib/x64/InnoMakerUsb2CanLib.h and .lib")
-endif()
-
-find_path(INNOMAKER_INCLUDE_DIR InnoMakerUsb2CanLib.h
-    PATHS "${INNOMAKER_SDK_ROOT}/Lib/x64" "${INNOMAKER_SDK_ROOT}/Lib"
-    NO_DEFAULT_PATH REQUIRED)
-find_library(INNOMAKER_IMPORT_LIBRARY InnoMakerUsb2CanLib
-    PATHS "${INNOMAKER_SDK_ROOT}/Lib/x64" "${INNOMAKER_SDK_ROOT}/Lib"
-    NO_DEFAULT_PATH REQUIRED)
-find_file(INNOMAKER_RUNTIME_DLL InnoMakerUsb2CanLib.dll
-    PATHS "${INNOMAKER_SDK_ROOT}/Lib/x64" "${INNOMAKER_SDK_ROOT}/Lib"
-    NO_DEFAULT_PATH REQUIRED)
+set(INNOMAKER_SDK_ROOT "" CACHE PATH "Path to InnoMaker USB2CAN SDK (folder containing Lib/x64)")
 
 add_library(InnoMakerNativeBridge SHARED InnoMakerNativeBridge.cpp)
-target_compile_features(InnoMakerNativeBridge PRIVATE cxx_std_17)
-target_include_directories(InnoMakerNativeBridge PRIVATE "${INNOMAKER_INCLUDE_DIR}")
-target_link_libraries(InnoMakerNativeBridge PRIVATE "${INNOMAKER_IMPORT_LIBRARY}")
-target_compile_definitions(InnoMakerNativeBridge PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 
-add_custom_command(TARGET InnoMakerNativeBridge POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${INNOMAKER_RUNTIME_DLL}" "$<TARGET_FILE_DIR:InnoMakerNativeBridge>")
+if(MSVC)
+    target_compile_definitions(InnoMakerNativeBridge PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+
+if(INNOMAKER_SDK_ROOT STREQUAL "")
+    message(WARNING "INNOMAKER_SDK_ROOT not set - building in mock-only mode")
+else()
+    target_include_directories(InnoMakerNativeBridge PRIVATE
+        "${INNOMAKER_SDK_ROOT}/Lib/x64")
+    target_link_libraries(InnoMakerNativeBridge PRIVATE
+        "${INNOMAKER_SDK_ROOT}/Lib/x64/InnoMakerUsb2CanLib.lib")
+    add_custom_command(TARGET InnoMakerNativeBridge POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${INNOMAKER_SDK_ROOT}/Lib/x64/InnoMakerUsb2CanLib.dll"
+            "$<TARGET_FILE_DIR:InnoMakerNativeBridge>")
+endif()
+
+# Configure with:
+# cmake -S InnoMakerNativeBridge -B InnoMakerNativeBridge/build -G "Visual Studio 17 2022" -A x64 -DINNOMAKER_SDK_ROOT="C:/path/to/usb2can/For Windows"
