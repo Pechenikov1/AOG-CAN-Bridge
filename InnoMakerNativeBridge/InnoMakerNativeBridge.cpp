@@ -1,184 +1,213 @@
-#define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
-#include <cstdint>
+#include "InnoMakerNativeBridge.h"
+
+#include <condition_variable>
 #include <cstring>
-#include <memory>
-#include <new>
-#include <InnoMakerUsb2CanLib.h>
+#include <deque>
+#include <mutex>
+#include <string>
 
-#ifdef _WIN32
-#define IM_EXPORT extern "C" __declspec(dllexport)
-#else
-#define IM_EXPORT extern "C"
-#endif
-
-// Stable C ABI consumed by the C# broker. Keep this independent of vendor C++
-// classes and verify the frame size/layout when updating the SDK.
-#pragma pack(push, 4)
-struct IM_CAN_FRAME
+namespace
 {
-    std::uint32_t identifier;
-    std::uint32_t flags; // bit 0 = extended
-    std::uint8_t dlc;
-    std::uint8_t data[8];
-    std::uint32_t timestamp_us;
-};
-#pragma pack(pop)
+    std::deque<IM_CAN_FRAME> g_receiveQueue;
+    std::mutex g_queueMutex;
+    std::condition_variable g_queueChanged;
+    bool g_mockMode = false;
+    bool g_open = false;
+    thread_local std::string g_lastError;
 
-struct IM_HANDLE
-{
-    InnoMakerUsb2CanLib* sdk = nullptr;
-    InnoMakerUsb2CanLib::InnoMakerDevice* device = nullptr;
-    InnoMakerUsb2CanLib::innomaker_can tx_state{};
-    bool opened = false;
-};
-
-static constexpr int IM_OK = 0;
-static constexpr int IM_TIMEOUT = 1;
-static constexpr int IM_INVALID_ARGUMENT = -1;
-static constexpr int IM_DEVICE_ERROR = -2;
-static constexpr int IM_UNSUPPORTED_BITRATE = -3;
-static constexpr std::uint32_t CAN_EFF_FLAG = 0x80000000u;
-static constexpr std::uint32_t CAN_RTR_FLAG = 0x40000000u;
-static constexpr std::uint32_t CAN_ERR_FLAG = 0x20000000u;
-static constexpr std::uint32_t CAN_ID_MASK = 0x1FFFFFFFu;
-static constexpr std::uint32_t RX_ECHO_ID = 0xFFFFFFFFu;
-
-IM_EXPORT int IM_CALL IM_Open(std::uint32_t device_index, std::uint32_t bitrate,
-    IM_HANDLE** output)
-{
-    if (!output) return IM_INVALID_ARGUMENT;
-    *output = nullptr;
-    if (bitrate != 250000u) return IM_UNSUPPORTED_BITRATE;
-
-    std::unique_ptr<IM_HANDLE> handle(new (std::nothrow) IM_HANDLE());
-    if (!handle) return IM_DEVICE_ERROR;
-    handle->sdk = new (std::nothrow) InnoMakerUsb2CanLib();
-    if (!handle->sdk || !handle->sdk->setup()) return IM_DEVICE_ERROR;
-
-    if (!handle->sdk->scanInnoMakerDevice() ||
-        device_index >= static_cast<std::uint32_t>(handle->sdk->getInnoMakerDeviceCount()))
+    void SetError(const char* message)
     {
-        handle->sdk->setdown();
-        return IM_DEVICE_ERROR;
+        g_lastError = message ? message : "";
     }
 
-    handle->device = handle->sdk->getInnoMakerDevice(static_cast<int>(device_index));
-    if (!handle->device) {
-        handle->sdk->setdown();
-        return IM_DEVICE_ERROR;
-    }
-
-    InnoMakerUsb2CanLib::Innomaker_device_bittming timing{};
-    // 250 kbit/s tuple from the vendor's official C# USB2CAN-C sample.
-    timing.prop_seg = 6;
-    timing.phase_seg1 = 7;
-    timing.phase_seg2 = 2;
-    timing.sjw = 1;
-    timing.brp = 12;
-
-    if (!handle->sdk->urbSetupDevice(handle->device,
-        InnoMakerUsb2CanLib::UsbCanModeNormal, timing))
+    bool IsOpen()
     {
-        handle->sdk->closeInnoMakerDevice(handle->device);
-        handle->sdk->setdown();
-        return IM_DEVICE_ERROR;
+        std::lock_guard<std::mutex> lock(g_queueMutex);
+        return g_open;
     }
-
-    for (int i = 0; i < handle->sdk->innomaker_MAX_TX_URBS; ++i)
-        handle->tx_state.tx_context[i].echo_id =
-            static_cast<std::uint32_t>(handle->sdk->innomaker_MAX_TX_URBS);
-
-    handle->opened = true;
-    *output = handle.release();
-    return IM_OK;
 }
 
-IM_EXPORT int IM_CALL IM_Send(IM_HANDLE* handle, const IM_CAN_FRAME* input)
+extern "C" IM_API int IM_Open(const char* devicePath, uint32_t baudrate)
 {
-    if (!handle || !handle->opened || !input || input->dlc > 8 ||
-        (input->flags & ~1u) != 0)
-        return IM_INVALID_ARGUMENT;
+    try
+    {
+        if (devicePath == nullptr || baudrate == 0)
+        {
+            SetError("Invalid device path or baud rate.");
+            return IM_ERR_PARAM;
+        }
 
-    const std::uint32_t max_id = (input->flags & 1u) ? 0x1FFFFFFFu : 0x7FFu;
-    if (input->identifier > max_id) return IM_INVALID_ARGUMENT;
+        std::lock_guard<std::mutex> lock(g_queueMutex);
+        g_receiveQueue.clear();
+        g_mockMode = std::strcmp(devicePath, "mock") == 0;
+        g_open = false;
 
-    auto* context = handle->sdk->innomaker_alloc_tx_context(&handle->tx_state);
-    if (!context || context->echo_id == 0xFFu) return IM_DEVICE_ERROR;
+        if (g_mockMode)
+        {
+            g_open = true;
+            SetError("");
+            return IM_OK;
+        }
 
-    InnoMakerUsb2CanLib::innomaker_host_frame frame{};
-    frame.echo_id = context->echo_id;
-    frame.can_id = input->identifier | ((input->flags & 1u) ? CAN_EFF_FLAG : 0u);
-    frame.can_dlc = input->dlc;
-    frame.channel = 0;
-    frame.flags = 0;
-    frame.reserved = 0;
-    std::memcpy(frame.data, input->data, 8);
-    frame.timestamp_us = 0;
-
-    const bool sent = handle->sdk->sendInnoMakerDeviceBuf(handle->device,
-        reinterpret_cast<BYTE*>(&frame), sizeof(frame), 10);
-    if (!sent) {
-        auto* allocated = handle->sdk->innomaker_get_tx_context(
-            &handle->tx_state, context->echo_id);
-        if (allocated) handle->sdk->innomaker_free_tx_context(allocated);
-        return IM_DEVICE_ERROR;
+        // TODO: извикай InnoMakerUsb2CanLib::open/send/receive тук
+        SetError("Real InnoMaker SDK integration is not implemented yet.");
+        return IM_ERR_OPEN;
     }
-    return IM_OK;
+    catch (...)
+    {
+        SetError("Unexpected exception in IM_Open.");
+        return IM_ERR_IO;
+    }
 }
 
-// Returns IM_OK for a bus frame, IM_TIMEOUT when no frame arrived by timeout,
-// and a negative code on SDK/argument errors. TX-completion echoes are consumed
-// and freed here, never exposed as incoming bus frames.
-IM_EXPORT int IM_CALL IM_Receive(IM_HANDLE* handle, IM_CAN_FRAME* output,
-    std::uint32_t timeout_ms)
+extern "C" IM_API int IM_Send(const IM_CAN_FRAME* frame)
 {
-    if (!handle || !handle->opened || !output) return IM_INVALID_ARGUMENT;
-    const DWORD started = GetTickCount();
-    do {
-        InnoMakerUsb2CanLib::innomaker_host_frame frame{};
-        const bool received = handle->sdk->recvInnoMakerDeviceBuf(handle->device,
-            reinterpret_cast<BYTE*>(&frame), sizeof(frame), 10);
-        if (!received) {
-            if (GetTickCount() - started >= timeout_ms) return IM_TIMEOUT;
-            continue;
+    try
+    {
+        if (frame == nullptr || frame->dlc > sizeof(frame->data))
+        {
+            SetError("Invalid CAN frame.");
+            return IM_ERR_PARAM;
         }
 
-        if (frame.echo_id != RX_ECHO_ID) {
-            auto* context = handle->sdk->innomaker_get_tx_context(
-                &handle->tx_state, frame.echo_id);
-            if (context) handle->sdk->innomaker_free_tx_context(context);
-            if (GetTickCount() - started >= timeout_ms) return IM_TIMEOUT;
-            continue;
+        {
+            std::lock_guard<std::mutex> lock(g_queueMutex);
+            if (!g_open)
+            {
+                SetError("Adapter is not open.");
+                return IM_ERR_OPEN;
+            }
+            if (!g_mockMode)
+            {
+                // TODO: извикай InnoMakerUsb2CanLib::open/send/receive тук
+                SetError("Real InnoMaker SDK integration is not implemented yet.");
+                return IM_ERR_IO;
+            }
+
+            IM_CAN_FRAME echo = *frame;
+            echo.flags = static_cast<uint8_t>(echo.flags | IM_FLAG_TX_ECHO);
+            g_receiveQueue.push_back(echo);
         }
-
-        if (frame.can_dlc > 8 || (frame.can_id & (CAN_RTR_FLAG | CAN_ERR_FLAG)))
-            continue; // current bridge protocol carries Classic CAN data frames only
-
-        const bool extended = (frame.can_id & CAN_EFF_FLAG) != 0;
-        output->identifier = frame.can_id & CAN_ID_MASK;
-        output->flags = extended ? 1u : 0u;
-        output->dlc = frame.can_dlc;
-        std::memcpy(output->data, frame.data, 8);
-        output->timestamp_us = frame.timestamp_us;
+        g_queueChanged.notify_one();
+        SetError("");
         return IM_OK;
-    } while (GetTickCount() - started < timeout_ms);
-    return IM_TIMEOUT;
+    }
+    catch (...)
+    {
+        SetError("Unexpected exception in IM_Send.");
+        return IM_ERR_IO;
+    }
 }
 
-IM_EXPORT int IM_CALL IM_Close(IM_HANDLE* handle)
+extern "C" IM_API int IM_Receive(IM_CAN_FRAME* frame, int timeoutMs)
 {
-    if (!handle) return IM_OK;
-    int result = IM_OK;
-    if (handle->opened && handle->sdk && handle->device) {
-        if (!handle->sdk->urbResetDevice(handle->device)) result = IM_DEVICE_ERROR;
-        if (!handle->sdk->closeInnoMakerDevice(handle->device)) result = IM_DEVICE_ERROR;
-        handle->opened = false;
+    try
+    {
+        if (frame == nullptr || timeoutMs < 0)
+        {
+            SetError("Invalid receive arguments.");
+            return IM_ERR_PARAM;
+        }
+
+        std::unique_lock<std::mutex> lock(g_queueMutex);
+        if (!g_open)
+        {
+            SetError("Adapter is not open.");
+            return IM_ERR_OPEN;
+        }
+        if (!g_mockMode)
+        {
+            // TODO: извикай InnoMakerUsb2CanLib::open/send/receive тук
+            SetError("Real InnoMaker SDK integration is not implemented yet.");
+            return IM_ERR_IO;
+        }
+
+        const bool available = g_queueChanged.wait_for(lock,
+            std::chrono::milliseconds(timeoutMs),
+            [] { return !g_receiveQueue.empty() || !g_open; });
+        if (!available)
+        {
+            SetError("Receive timed out.");
+            return IM_ERR_TIMEOUT;
+        }
+        if (!g_open)
+        {
+            SetError("Adapter was closed while waiting for a frame.");
+            return IM_ERR_OPEN;
+        }
+
+        *frame = g_receiveQueue.front();
+        g_receiveQueue.pop_front();
+        lock.unlock();
+        SetError("");
+        return IM_OK;
     }
-    if (handle->sdk) {
-        if (!handle->sdk->setdown()) result = IM_DEVICE_ERROR;
-        delete handle->sdk;
+    catch (...)
+    {
+        SetError("Unexpected exception in IM_Receive.");
+        return IM_ERR_IO;
     }
-    delete handle;
-    return result;
+}
+
+extern "C" IM_API void IM_Close(void)
+{
+    try
+    {
+        {
+            std::lock_guard<std::mutex> lock(g_queueMutex);
+            g_open = false;
+            g_mockMode = false;
+            g_receiveQueue.clear();
+        }
+        g_queueChanged.notify_all();
+        SetError("");
+    }
+    catch (...)
+    {
+        SetError("Unexpected exception in IM_Close.");
+    }
+}
+
+extern "C" IM_API const char* IM_LastError(void)
+{
+    try
+    {
+        return g_lastError.c_str();
+    }
+    catch (...)
+    {
+        return "Unexpected exception in IM_LastError.";
+    }
+}
+
+extern "C" IM_API int IM_InjectRx(const IM_CAN_FRAME* frame)
+{
+    try
+    {
+        if (frame == nullptr || frame->dlc > sizeof(frame->data))
+        {
+            SetError("Invalid injected CAN frame.");
+            return IM_ERR_PARAM;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_queueMutex);
+            if (!g_open || !g_mockMode)
+            {
+                SetError("RX injection is only available in open mock mode.");
+                return IM_ERR_PARAM;
+            }
+            IM_CAN_FRAME received = *frame;
+            received.flags = static_cast<uint8_t>(received.flags & ~IM_FLAG_TX_ECHO);
+            g_receiveQueue.push_back(received);
+        }
+        g_queueChanged.notify_one();
+        SetError("");
+        return IM_OK;
+    }
+    catch (...)
+    {
+        SetError("Unexpected exception in IM_InjectRx.");
+        return IM_ERR_IO;
+    }
 }
