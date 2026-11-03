@@ -9,6 +9,7 @@ namespace AogCanBridge
         internal const ushort Baud250K = 0x011C;
         internal const uint ErrorOk = 0;
         internal const uint ErrorReceiveQueueEmpty = 0x20;
+        public const byte MessageRemote = 0x01;
         internal const byte MessageExtended = 0x02;
 
         [StructLayout(LayoutKind.Sequential, Pack = 1)]
