@@ -1,6 +1,7 @@
 #include "InnoMakerNativeBridge.h"
 
 #include <condition_variable>
+#include <chrono>
 #include <cstring>
 #include <deque>
 #include <mutex>
