@@ -60,6 +60,7 @@ IM_API int IM_Send(const IM_CAN_FRAME* frame);
 IM_API int IM_Receive(IM_CAN_FRAME* frame, int timeoutMs);
 IM_API void IM_Close(void);
 IM_API const char* IM_LastError(void);
+IM_API int IM_InjectRx(const IM_CAN_FRAME* frame);
 
 #ifdef __cplusplus
 }
