@@ -16,6 +16,8 @@ namespace AogCanBridge
         private const int BusBitrate = 250000;
         private readonly Label languageCaptionLabel = new Label();
         private readonly ComboBox languageBox = new ComboBox();
+        private readonly Label backendLabel = new Label();
+        private readonly ComboBox backendBox = new ComboBox();
         private readonly Label pcanChannelLabel = new Label();
         private readonly ComboBox channelBox = new ComboBox();
         private readonly Button startButton = new Button();
@@ -28,8 +30,7 @@ namespace AogCanBridge
         private readonly NotifyIcon trayIcon = new NotifyIcon();
         private readonly ToolStripMenuItem trayShowMenuItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem trayExitMenuItem = new ToolStripMenuItem();
-        private readonly Dictionary<string, ClientState> clients =
-            new Dictionary<string, ClientState>();
+        private readonly Dictionary<string, ClientState> clients = new Dictionary<string, ClientState>();
         private readonly object sync = new object();
         private readonly ConcurrentQueue<PcanBasic.CanMessage> transmitQueue =
             new ConcurrentQueue<PcanBasic.CanMessage>();
@@ -44,11 +45,13 @@ namespace AogCanBridge
         private long busBits;
         private long lastBusBits;
         private DateTime lastBusloadSampleTime;
+        private ICanBackend backend;
+        private BackendMode backendMode = BackendMode.Pcan;
 
         internal BridgeForm(bool autoStart = false, bool minimized = false)
         {
             Text = "AOG CAN Bridge";
-            ClientSize = new Size(420, 296);
+            ClientSize = new Size(420, 340);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -67,48 +70,65 @@ namespace AogCanBridge
             languageBox.SelectedIndexChanged += (_, __) => ChangeLanguage();
             Controls.Add(languageBox);
 
-            pcanChannelLabel.Location = new Point(20, 56);
+            backendLabel.Location = new Point(20, 58);
+            backendLabel.AutoSize = true;
+            Controls.Add(backendLabel);
+
+            backendBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            backendBox.Location = new Point(125, 54);
+            backendBox.Width = 180;
+            backendBox.Items.Add("PEAK PCAN");
+            backendBox.Items.Add("InnoMaker USB2CAN-C");
+            backendBox.SelectedIndex = 0;
+            backendBox.SelectedIndexChanged += (_, __) =>
+            {
+                backendMode = (BackendMode)backendBox.SelectedIndex;
+                channelBox.Enabled = backendMode == BackendMode.Pcan;
+            };
+            Controls.Add(backendBox);
+
+            pcanChannelLabel.Location = new Point(20, 95);
             pcanChannelLabel.AutoSize = true;
             Controls.Add(pcanChannelLabel);
 
             channelBox.DropDownStyle = ComboBoxStyle.DropDownList;
-            channelBox.Location = new Point(125, 52);
+            channelBox.Location = new Point(125, 91);
             channelBox.Width = 130;
             for (int index = 1; index <= 8; index++)
                 channelBox.Items.Add("PCAN-USB " + index);
             channelBox.SelectedIndex = 0;
             Controls.Add(channelBox);
 
-            startButton.Location = new Point(275, 50);
+            startButton.Location = new Point(275, 88);
             startButton.Size = new Size(120, 30);
             startButton.Click += (_, __) => ToggleBridge();
             Controls.Add(startButton);
 
             statusLabel.ForeColor = Color.DarkRed;
             statusLabel.Font = new Font(Font, FontStyle.Bold);
-            statusLabel.Location = new Point(20, 104);
+            statusLabel.Location = new Point(20, 138);
             statusLabel.Size = new Size(375, 24);
             Controls.Add(statusLabel);
 
-            clientsLabel.Location = new Point(20, 142);
+            clientsLabel.Location = new Point(20, 170);
             clientsLabel.Size = new Size(375, 24);
             Controls.Add(clientsLabel);
 
-            countersLabel.Location = new Point(20, 172);
+            countersLabel.Location = new Point(20, 198);
             countersLabel.Size = new Size(375, 24);
             Controls.Add(countersLabel);
 
-            busloadLabel.Location = new Point(20, 200);
+            busloadLabel.Location = new Point(20, 226);
             busloadLabel.Size = new Size(375, 18);
             Controls.Add(busloadLabel);
 
-            busloadBar.Location = new Point(20, 220);
+            busloadBar.Location = new Point(20, 246);
             busloadBar.Size = new Size(375, 16);
             busloadBar.Minimum = 0;
             busloadBar.Maximum = 100;
             Controls.Add(busloadBar);
 
-            hintLabel.Location = new Point(20, 254);
+            hintLabel.Location = new Point(20, 280);
             hintLabel.Size = new Size(375, 22);
             Controls.Add(hintLabel);
 
@@ -123,15 +143,8 @@ namespace AogCanBridge
             trayIcon.DoubleClick += (_, __) => RestoreFromTray();
             trayIcon.Visible = true;
 
-            Resize += (_, __) =>
-            {
-                if (WindowState == FormWindowState.Minimized) MinimizeToTray();
-            };
-            FormClosing += (_, __) =>
-            {
-                StopBridge();
-                trayIcon.Visible = false;
-            };
+            Resize += (_, __) => { if (WindowState == FormWindowState.Minimized) MinimizeToTray(); };
+            FormClosing += (_, __) => { StopBridge(); trayIcon.Visible = false; };
 
             InitializeLanguages();
 
@@ -171,7 +184,6 @@ namespace AogCanBridge
         {
             List<LanguageInfo> languages = Localization.DiscoverLanguages();
             LanguageInfo selected = Localization.ResolveSavedLanguage(languages);
-
             languageBox.Items.Clear();
             foreach (LanguageInfo language in languages) languageBox.Items.Add(language);
             languageBox.SelectedItem = selected;
@@ -189,11 +201,10 @@ namespace AogCanBridge
         {
             bool running = worker != null && worker.IsAlive;
             languageCaptionLabel.Text = Localization.Get("Language");
+            backendLabel.Text = "Adapter";
             pcanChannelLabel.Text = Localization.Get("PcanChannel");
             startButton.Text = running ? Localization.Get("Stop") : Localization.Get("Start");
-            statusLabel.Text = running
-                ? Localization.Get("StatusRunning", channelBox.SelectedItem)
-                : Localization.Get("StatusStopped");
+            statusLabel.Text = running ? Localization.Get("StatusRunning", channelBox.SelectedItem) : Localization.Get("StatusStopped");
             hintLabel.Text = Localization.Get("Hint");
             trayShowMenuItem.Text = Localization.Get("TrayShow");
             trayExitMenuItem.Text = Localization.Get("TrayExit");
@@ -208,22 +219,17 @@ namespace AogCanBridge
 
         private void StartBridge()
         {
+            backendMode = (BackendMode)backendBox.SelectedIndex;
             pcanChannel = (ushort)(PcanBasic.PcanUsbBus1 + channelBox.SelectedIndex);
-            uint result;
-            try
-            {
-                result = PcanBasic.Initialize(pcanChannel, PcanBasic.Baud250K);
-            }
-            catch (DllNotFoundException)
-            {
-                MessageBox.Show(this, Localization.Get("ErrorDllMissing"),
-                    "AOG CAN Bridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
+            backend = backendMode == BackendMode.Pcan ? (ICanBackend)new PcanBackend() : new InnoMakerBackend();
 
+            uint result = backend.Initialize(pcanChannel, PcanBasic.Baud250K);
             if (result != PcanBasic.ErrorOk)
             {
-                MessageBox.Show(this, GetPcanError(result), Localization.Get("ErrorCannotOpenPcanTitle"),
+                string title = backendMode == BackendMode.Pcan
+                    ? Localization.Get("ErrorCannotOpenPcanTitle")
+                    : "Cannot open InnoMaker USB2CAN-C";
+                MessageBox.Show(this, backend.GetErrorText(result), title,
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
@@ -232,17 +238,12 @@ namespace AogCanBridge
             {
                 udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, BridgePort));
                 udp.Client.ReceiveBufferSize = 4 * 1024 * 1024;
-
-                // Windows reports an ICMP "port unreachable" response as a
-                // SocketException on the next UDP receive. A client may exit
-                // normally between packets, so this must not stop the broker.
                 const int SioUdpConnectionReset = -1744830452;
-                udp.Client.IOControl((IOControlCode)SioUdpConnectionReset,
-                    new byte[] { 0 }, null);
+                udp.Client.IOControl((IOControlCode)SioUdpConnectionReset, new byte[] { 0 }, null);
             }
             catch (Exception exception)
             {
-                PcanBasic.Uninitialize(pcanChannel);
+                backend.Uninitialize(pcanChannel);
                 MessageBox.Show(this, Localization.Get("ErrorCannotOpenPort", BridgePort, exception.Message),
                     "AOG CAN Bridge", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
@@ -260,6 +261,7 @@ namespace AogCanBridge
             worker.Start();
             transmitWorker.Start();
             channelBox.Enabled = false;
+            backendBox.Enabled = false;
             startButton.Text = Localization.Get("Stop");
             statusLabel.Text = Localization.Get("StatusRunning", channelBox.SelectedItem);
             statusLabel.ForeColor = Color.DarkGreen;
@@ -279,15 +281,17 @@ namespace AogCanBridge
                 udp.Close();
                 udp = null;
             }
-            // If the transmit thread is still draining a backlog, PcanBasic.Write
-            // may still be in flight on pcanChannel — uninitializing it concurrently
-            // could crash the driver, so skip it and leak the handle instead.
-            if (pcanChannel != 0 && transmitDrained) PcanBasic.Uninitialize(pcanChannel);
+            if (backend != null && pcanChannel != 0 && transmitDrained)
+            {
+                backend.Uninitialize(pcanChannel);
+            }
+            backend = null;
             pcanChannel = 0;
             lock (sync) clients.Clear();
             if (!IsDisposed)
             {
                 channelBox.Enabled = true;
+                backendBox.Enabled = true;
                 startButton.Text = Localization.Get("Start");
                 statusLabel.Text = Localization.Get("StatusStopped");
                 statusLabel.ForeColor = Color.DarkRed;
@@ -316,10 +320,6 @@ namespace AogCanBridge
 
         private void ReceiveClientPackets()
         {
-            // Do not let a burst from VT or TC starve frames arriving from the
-            // physical CAN bus. Transport protocol timing is tight enough that
-            // draining the complete UDP queue here can make a control function
-            // appear offline to the other client.
             const int maximumPacketsPerPass = 64;
             int processedPackets = 0;
             while (udp != null && processedPackets++ < maximumPacketsPerPass)
@@ -334,8 +334,6 @@ namespace AogCanBridge
                 }
                 catch (SocketException)
                 {
-                    // A local UDP client may disappear without a shutdown
-                    // handshake. Ignore that transient condition.
                     return;
                 }
                 catch (ObjectDisposedException)
@@ -363,17 +361,12 @@ namespace AogCanBridge
                     PcanBasic.CanMessage message = new PcanBasic.CanMessage
                     {
                         Id = packet.Identifier,
-                        MessageType = (byte)((packet.Flags & 1) != 0 ?
-                            PcanBasic.MessageExtended : 0),
+                        MessageType = (byte)((packet.Flags & 1) != 0 ? PcanBasic.MessageExtended : 0),
                         Length = packet.DataLength,
                         Data = new byte[8]
                     };
                     Buffer.BlockCopy(packet.Data, 0, message.Data, 0, 8);
 
-                    // Local VT/TC communication must not wait for a physical
-                    // PCAN write. A slow driver call previously stopped both
-                    // local forwarding and physical CAN reception for several
-                    // seconds, which made VT discard every working set.
                     packet.Type = BridgeMessageType.FrameToClient;
                     Broadcast(packet, endpointKey);
 
@@ -389,7 +382,7 @@ namespace AogCanBridge
             {
                 if (transmitQueue.TryDequeue(out PcanBasic.CanMessage message))
                 {
-                    if (PcanBasic.Write(pcanChannel, ref message) == PcanBasic.ErrorOk)
+                    if (backend != null && backend.Write(pcanChannel, ref message) == PcanBasic.ErrorOk)
                     {
                         Interlocked.Increment(ref transmittedFrames);
                         Interlocked.Add(ref busBits, EstimateFrameBits(message.Length,
@@ -405,12 +398,12 @@ namespace AogCanBridge
 
         private void ReceiveCanFrames()
         {
-            // Share loop time fairly with the two local clients.
             const int maximumFramesPerPass = 64;
             int processedFrames = 0;
             while (processedFrames++ < maximumFramesPerPass)
             {
-                uint result = PcanBasic.Read(pcanChannel, out PcanBasic.CanMessage message,
+                if (backend == null) return;
+                uint result = backend.Read(pcanChannel, out PcanBasic.CanMessage message,
                     out PcanBasic.CanTimestamp timestamp);
                 if (result == PcanBasic.ErrorReceiveQueueEmpty) return;
                 if (result != PcanBasic.ErrorOk) return;
@@ -502,16 +495,12 @@ namespace AogCanBridge
             {
                 case PatchState.NotFound: return Localization.Get("PatchNotFound");
                 case PatchState.Unpatched: return Localization.Get("PatchUnpatched");
-                default: return connected
-                    ? Localization.Get("PatchPatchedConnected")
-                    : Localization.Get("PatchPatched");
+                default: return connected ? Localization.Get("PatchPatchedConnected") : Localization.Get("PatchPatched");
             }
         }
 
         private static int EstimateFrameBits(byte dataLength, bool extended)
         {
-            // Nominal bit count (SOF, arbitration, control, CRC, ACK, EOF, IFS)
-            // without bit stuffing; a close-enough estimate for a load indicator.
             return (extended ? 67 : 47) + 8 * dataLength;
         }
 
