@@ -57,7 +57,11 @@ namespace AogCanBridge
         private string _lastError = string.Empty;
 
         public InnoMakerBackend()
-            : this("mock", 250000)
+            : this(
+                // Default to "mock" for tests. For real hardware, set env var INNOMAKER_DEVICE_PATH
+                // (e.g. "COM3") or use the 2-arg constructor. UI configuration is planned for a later phase.
+                Environment.GetEnvironmentVariable("INNOMAKER_DEVICE_PATH") ?? "mock",
+                250000)
         {
         }
 
@@ -248,7 +252,9 @@ namespace AogCanBridge
             message = new PcanBasic.CanMessage
             {
                 Id = frame.Id,
-                MessageType = (byte)((frame.Flags & 0x01) != 0 ? PcanBasic.MessageExtended : 0),
+                MessageType = (byte)(
+                    ((frame.Flags & 0x01) != 0 ? PcanBasic.MessageExtended : 0) |
+                    ((frame.Flags & 0x02) != 0 ? PcanBasic.MessageRemote : 0)),
                 Length = frame.Dlc,
                 Data = frame.Data ?? new byte[8]
             };
@@ -263,7 +269,9 @@ namespace AogCanBridge
             byte[] data = new byte[message.Length];
             Buffer.BlockCopy(message.Data, 0, data, 0, message.Length);
 
-            bool ok = Send(message.Id, data, (message.MessageType & PcanBasic.MessageExtended) != 0);
+            bool ok = Send(message.Id, data,
+                (message.MessageType & PcanBasic.MessageExtended) != 0,
+                (message.MessageType & PcanBasic.MessageRemote) != 0);
             return ok ? PcanBasic.ErrorOk : ErrorNativeMissing;
         }
 
