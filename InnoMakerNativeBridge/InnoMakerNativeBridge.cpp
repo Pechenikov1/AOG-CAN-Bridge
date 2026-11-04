@@ -17,13 +17,10 @@ namespace
     bool g_open = false;
     thread_local std::string g_lastError;
 
-    VCI_INIT_CONFIG g_initConfig{};
-    VCI_CAN_OBJ g_sendObj{};
-    VCI_CAN_OBJ g_recvObj{};
-    DWORD g_deviceType = VCI_USBCAN2;
-    DWORD g_deviceInd = 0;
-    DWORD g_canInd = 0;
+    InnoMakerUsb2CanLib g_sdk;
+    InnoMakerUsb2CanLib::InnoMakerDevice* g_device = nullptr;
     bool g_realMode = false;
+    BYTE g_rxBuffer[64]{};
 
     void SetError(const char* message)
     {
@@ -46,6 +43,7 @@ extern "C" IM_API int IM_Open(const char* devicePath, uint32_t baudrate)
         g_mockMode = std::strcmp(devicePath, "mock") == 0;
         g_open = false;
         g_realMode = false;
+        g_device = nullptr;
 
         if (g_mockMode)
         {
@@ -56,35 +54,51 @@ extern "C" IM_API int IM_Open(const char* devicePath, uint32_t baudrate)
 
         if (baudrate != 250000)
         {
-            SetError("Only 250 kbit/s is configured for the InnoMaker SDK backend.");
+            SetError("Only 250 kbit/s is supported by this SDK configuration.");
             return IM_ERR_PARAM;
         }
 
-        // The vendor API reports success as nonzero for OpenDevice, InitCAN, and StartCAN.
-        if (VCI_OpenDevice(g_deviceType, g_deviceInd, 0) == 0)
+        if (!g_sdk.setup())
         {
-            SetError("VCI_OpenDevice failed.");
+            SetError("InnoMakerUsb2CanLib::setup failed.");
+            return IM_ERR_OPEN;
+        }
+        if (!g_sdk.scanInnoMakerDevice())
+        {
+            g_sdk.setdown();
+            SetError("InnoMakerUsb2CanLib::scanInnoMakerDevice failed.");
+            return IM_ERR_OPEN;
+        }
+        if (g_sdk.getInnoMakerDeviceCount() == 0)
+        {
+            g_sdk.setdown();
+            SetError("No InnoMaker device was found.");
             return IM_ERR_OPEN;
         }
 
-        g_initConfig.AccCode = 0;
-        g_initConfig.AccMask = 0xFFFFFFFF;
-        g_initConfig.Filter = 0;
-        g_initConfig.Timing0 = 0x01;
-        g_initConfig.Timing1 = 0x1C;
-        g_initConfig.Mode = 0;
-
-        if (VCI_InitCAN(g_deviceType, g_deviceInd, g_canInd, &g_initConfig) == 0)
+        g_device = g_sdk.getInnoMakerDevice(0);
+        if (g_device == nullptr)
         {
-            VCI_CloseDevice(g_deviceType, g_deviceInd);
-            SetError("VCI_InitCAN failed.");
+            g_sdk.setdown();
+            SetError("getInnoMakerDevice returned null.");
+            return IM_ERR_OPEN;
+        }
+        if (!g_sdk.openInnoMakerDevice(g_device))
+        {
+            g_device = nullptr;
+            g_sdk.setdown();
+            SetError("InnoMakerUsb2CanLib::openInnoMakerDevice failed.");
             return IM_ERR_OPEN;
         }
 
-        if (VCI_StartCAN(g_deviceType, g_deviceInd, g_canInd) == 0)
+        InnoMakerUsb2CanLib::Innomaker_device_bittming timing = { 6, 7, 2, 1, 12 };
+        if (!g_sdk.urbSetupDevice(g_device,
+            InnoMakerUsb2CanLib::UsbCanMode::UsbCanModeNormal, timing))
         {
-            VCI_CloseDevice(g_deviceType, g_deviceInd);
-            SetError("VCI_StartCAN failed.");
+            g_sdk.closeInnoMakerDevice(g_device);
+            g_device = nullptr;
+            g_sdk.setdown();
+            SetError("InnoMakerUsb2CanLib::urbSetupDevice failed.");
             return IM_ERR_OPEN;
         }
 
@@ -95,6 +109,18 @@ extern "C" IM_API int IM_Open(const char* devicePath, uint32_t baudrate)
     }
     catch (...)
     {
+        try
+        {
+            if (g_device != nullptr)
+                g_sdk.closeInnoMakerDevice(g_device);
+            g_device = nullptr;
+            g_sdk.setdown();
+        }
+        catch (...)
+        {
+        }
+        g_realMode = false;
+        g_open = false;
         SetError("Unexpected exception in IM_Open.");
         return IM_ERR_IO;
     }
@@ -119,18 +145,22 @@ extern "C" IM_API int IM_Send(const IM_CAN_FRAME* frame)
             }
             if (g_realMode)
             {
-                std::memset(&g_sendObj, 0, sizeof(g_sendObj));
-                g_sendObj.ID = frame->id;
-                g_sendObj.SendType = 0;
-                g_sendObj.RemoteFlag = (frame->flags & IM_FLAG_RTR) ? 1 : 0;
-                g_sendObj.ExternFlag = (frame->flags & IM_FLAG_EXTENDED) ? 1 : 0;
-                g_sendObj.DataLen = frame->dlc;
-                std::memcpy(g_sendObj.Data, frame->data, sizeof(g_sendObj.Data));
+                InnoMakerUsb2CanLib::innomaker_host_frame sdkFrame = {};
+                sdkFrame.can_id = frame->id;
+                sdkFrame.can_dlc = frame->dlc;
+                sdkFrame.channel = 0;
+                sdkFrame.flags = 0;
+                if (frame->flags & IM_FLAG_EXTENDED)
+                    sdkFrame.can_id |= 0x80000000u;
+                if (frame->flags & IM_FLAG_RTR)
+                    sdkFrame.can_id |= 0x40000000u;
+                std::memcpy(sdkFrame.data, frame->data, frame->dlc);
+                sdkFrame.echo_id = 0xFFFFFFFFu;
 
-                // VCI_Transmit returns the number of frames transmitted; zero indicates failure.
-                if (VCI_Transmit(g_deviceType, g_deviceInd, g_canInd, &g_sendObj, 1) == 0)
+                if (!g_sdk.sendInnoMakerDeviceBuf(g_device,
+                    reinterpret_cast<BYTE*>(&sdkFrame), sizeof(sdkFrame), 1000))
                 {
-                    SetError("VCI_Transmit failed.");
+                    SetError("InnoMakerUsb2CanLib::sendInnoMakerDeviceBuf failed.");
                     return IM_ERR_IO;
                 }
                 SetError("");
@@ -175,23 +205,35 @@ extern "C" IM_API int IM_Receive(IM_CAN_FRAME* frame, int timeoutMs)
         }
         if (g_realMode)
         {
-            std::memset(&g_recvObj, 0, sizeof(g_recvObj));
-            const DWORD received = VCI_Receive(g_deviceType, g_deviceInd, g_canInd,
-                &g_recvObj, 1, static_cast<int>(timeoutMs));
-            if (received == 0)
+            if (!g_sdk.recvInnoMakerDeviceBuf(g_device, g_rxBuffer,
+                sizeof(g_rxBuffer), static_cast<unsigned int>(timeoutMs)))
             {
-                SetError("VCI_Receive timed out or failed to receive a frame.");
+                SetError("InnoMakerUsb2CanLib::recvInnoMakerDeviceBuf timed out or failed.");
                 return IM_ERR_TIMEOUT;
             }
 
-            frame->id = g_recvObj.ID;
-            frame->dlc = static_cast<uint8_t>(g_recvObj.DataLen > 8 ? 8 : g_recvObj.DataLen);
+            const auto* sdkFrame = reinterpret_cast<const InnoMakerUsb2CanLib::innomaker_host_frame*>(g_rxBuffer);
+            if (sdkFrame->echo_id != 0xFFFFFFFFu)
+            {
+                SetError("");
+                return IM_ERR_TIMEOUT;
+            }
+            if (sdkFrame->can_dlc > sizeof(frame->data))
+            {
+                SetError("Received CAN frame has invalid DLC.");
+                return IM_ERR_IO;
+            }
+
+            frame->id = sdkFrame->can_id & 0x1FFFFFFFu;
+            frame->dlc = sdkFrame->can_dlc;
             frame->flags = 0;
-            if (g_recvObj.ExternFlag)
+            if (sdkFrame->can_id & 0x80000000u)
                 frame->flags = static_cast<uint8_t>(frame->flags | IM_FLAG_EXTENDED);
-            if (g_recvObj.RemoteFlag)
+            if (sdkFrame->can_id & 0x40000000u)
                 frame->flags = static_cast<uint8_t>(frame->flags | IM_FLAG_RTR);
-            std::memcpy(frame->data, g_recvObj.Data, sizeof(frame->data));
+            std::memcpy(frame->data, sdkFrame->data, frame->dlc);
+            if (frame->dlc < sizeof(frame->data))
+                std::memset(frame->data + frame->dlc, 0, sizeof(frame->data) - frame->dlc);
             SetError("");
             return IM_OK;
         }
@@ -236,7 +278,10 @@ extern "C" IM_API void IM_Close(void)
             std::lock_guard<std::mutex> lock(g_queueMutex);
             if (g_realMode)
             {
-                VCI_CloseDevice(g_deviceType, g_deviceInd);
+                if (g_device != nullptr)
+                    g_sdk.closeInnoMakerDevice(g_device);
+                g_sdk.setdown();
+                g_device = nullptr;
                 g_realMode = false;
             }
             g_open = false;
@@ -248,6 +293,9 @@ extern "C" IM_API void IM_Close(void)
     }
     catch (...)
     {
+        g_device = nullptr;
+        g_realMode = false;
+        g_open = false;
         SetError("Unexpected exception in IM_Close.");
     }
 }
