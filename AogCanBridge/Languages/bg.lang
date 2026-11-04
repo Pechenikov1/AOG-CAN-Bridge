@@ -1,0 +1,22 @@
+# AOG CAN Bridge - Bulgarian
+LanguageName=Български
+Language=Език
+PcanChannel=PCAN Канал
+Start=Старт
+Stop=Стоп
+StatusStopped=Спрян
+StatusRunning=Работи — {0}
+Clients=Клиенти: {0}    VT (2): {1}    TC (3): {2}
+PatchNotFound=не е намерен
+PatchUnpatched=не е пачнат
+PatchPatched=пачнат
+PatchPatchedConnected=пачнат, свързан
+Counters=Приемане (RX): {0}    Изпращане (TX): {1}
+BusLoad=Натоварване на шината: {0}%
+Hint=Стартирайте моста преди VT и Task Controller.
+TrayShow=Покажи
+TrayExit=Изход
+ErrorDllMissing=PCANBasic.dll не е намерен до AogCanBridge.exe.
+ErrorCannotOpenPcanTitle=Не може да се отвори PCAN
+ErrorCannotOpenPort=Не може да се отвори локален порт {0}:\r\n{1}
+ErrorPcan=PCAN грешка 0x{0}
