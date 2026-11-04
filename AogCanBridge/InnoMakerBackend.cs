@@ -42,7 +42,7 @@ namespace AogCanBridge
         internal static extern int IM_InjectRx(ref ImCanFrame frame);
     }
 
-    public sealed class InnoMakerBackend : ICanBackend, IDisposable
+    internal sealed class InnoMakerBackend : ICanBackend, IDisposable
     {
         internal const uint ErrorNotImplemented = 0xE0000001;
         internal const uint ErrorNativeMissing = 0xE0000002;

@@ -1,17 +1,32 @@
-<Project Sdk="Microsoft.NET.Sdk.WindowsDesktop">
-  <PropertyGroup>
-    <OutputType>WinExe</OutputType>
-    <TargetFramework>net48</TargetFramework>
-    <UseWindowsForms>true</UseWindowsForms>
-    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
-    <PlatformTarget>x64</PlatformTarget>
-    <AssemblyName>AogCanBridge</AssemblyName>
-    <RootNamespace>AogCanBridge</RootNamespace>
-    <ApplicationIcon>favicon.ico</ApplicationIcon>
-  </PropertyGroup>
-  <ItemGroup>
-    <Content Include="Languages\*.lang">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-  </ItemGroup>
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net8.0-windows</TargetFramework>
+		<UseWindowsForms>true</UseWindowsForms>
+		<AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+		<PlatformTarget>x64</PlatformTarget>
+		<AssemblyName>AogCanBridge</AssemblyName>
+		<RootNamespace>AogCanBridge</RootNamespace>
+		<ApplicationIcon>favicon.ico</ApplicationIcon>
+
+		<!-- Тези три реда са новите/поправените -->
+		<Nullable>enable</Nullable>
+		<LangVersion>latest</LangVersion>
+		<ImplicitUsings>enable</ImplicitUsings>
+	</PropertyGroup>
+
+	<!-- Този блок позволява на тестовия проект да вижда internal класовете -->
+	<ItemGroup>
+		<InternalsVisibleTo Include="AogCanBridge.Tests" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<Content Include="Languages\*.lang">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</Content>
+	</ItemGroup>
+
+	<ItemGroup>
+	  <Compile Remove="InnoMakerFrameCodec.cs" />
+	</ItemGroup>
 </Project>
