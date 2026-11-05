@@ -155,6 +155,7 @@ extern "C" IM_API int IM_Send(const IM_CAN_FRAME* frame)
                 if (frame->flags & IM_FLAG_RTR)
                     sdkFrame.can_id |= 0x40000000u;
                 std::memcpy(sdkFrame.data, frame->data, frame->dlc);
+                // Sentinel requests no TX echo/confirmation frame from the SDK.
                 sdkFrame.echo_id = 0xFFFFFFFFu;
 
                 if (!g_sdk.sendInnoMakerDeviceBuf(g_device,
@@ -205,8 +206,12 @@ extern "C" IM_API int IM_Receive(IM_CAN_FRAME* frame, int timeoutMs)
         }
         if (g_realMode)
         {
+            // Bound SDK polling latency so the RX worker does not hold the shared
+            // queue lock for the C# caller's full 100 ms timeout. This also keeps
+            // concurrent TX calls from being delayed by a long receive wait.
+            const unsigned int sdkTimeoutMs = static_cast<unsigned int>(timeoutMs > 10 ? 10 : timeoutMs);
             if (!g_sdk.recvInnoMakerDeviceBuf(g_device, g_rxBuffer,
-                sizeof(g_rxBuffer), static_cast<unsigned int>(timeoutMs)))
+                sizeof(g_rxBuffer), sdkTimeoutMs))
             {
                 SetError("InnoMakerUsb2CanLib::recvInnoMakerDeviceBuf timed out or failed.");
                 return IM_ERR_TIMEOUT;
