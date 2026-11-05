@@ -7,6 +7,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <type_traits>
 
 namespace
 {
@@ -20,7 +21,7 @@ namespace
     InnoMakerUsb2CanLib g_sdk;
     InnoMakerUsb2CanLib::InnoMakerDevice* g_device = nullptr;
     bool g_realMode = false;
-    BYTE g_rxBuffer[64]{};
+    BYTE g_rxBuffer[1024]{};
 
     void SetError(const char* message)
     {
@@ -206,41 +207,70 @@ extern "C" IM_API int IM_Receive(IM_CAN_FRAME* frame, int timeoutMs)
         }
         if (g_realMode)
         {
-            // Bound SDK polling latency so the RX worker does not hold the shared
-            // queue lock for the C# caller's full 100 ms timeout. This also keeps
-            // concurrent TX calls from being delayed by a long receive wait.
+            struct InnoMakerHostFrame
+            {
+                uint32_t echo_id;
+                uint32_t can_id;
+                uint8_t can_dlc;
+                uint8_t channel;
+                uint8_t flags;
+                uint8_t reserved;
+                uint8_t data[8];
+                uint32_t timestamp_us;
+            };
+            static_assert(sizeof(InnoMakerHostFrame) == 24,
+                "InnoMaker host frame ABI must be 24 bytes");
+
             const unsigned int sdkTimeoutMs = static_cast<unsigned int>(timeoutMs > 10 ? 10 : timeoutMs);
-            if (!g_sdk.recvInnoMakerDeviceBuf(g_device, g_rxBuffer,
-                sizeof(g_rxBuffer), sdkTimeoutMs))
+            const auto receiveResult = g_sdk.recvInnoMakerDeviceBuf(g_device,
+                g_rxBuffer, sizeof(g_rxBuffer), sdkTimeoutMs);
+            if (!receiveResult)
             {
                 SetError("InnoMakerUsb2CanLib::recvInnoMakerDeviceBuf timed out or failed.");
                 return IM_ERR_TIMEOUT;
             }
 
-            const auto* sdkFrame = reinterpret_cast<const InnoMakerUsb2CanLib::innomaker_host_frame*>(g_rxBuffer);
-            if (sdkFrame->echo_id != 0xFFFFFFFFu)
+            size_t receivedBytes = sizeof(InnoMakerHostFrame);
+            if constexpr (!std::is_same_v<std::decay_t<decltype(receiveResult)>, bool>)
             {
-                SetError("");
-                return IM_ERR_TIMEOUT;
+                if (receiveResult <= 0)
+                {
+                    SetError("InnoMakerUsb2CanLib::recvInnoMakerDeviceBuf timed out or failed.");
+                    return IM_ERR_TIMEOUT;
+                }
+                receivedBytes = static_cast<size_t>(receiveResult);
             }
-            if (sdkFrame->can_dlc > sizeof(frame->data))
+            if (receivedBytes > sizeof(g_rxBuffer))
+                receivedBytes = sizeof(g_rxBuffer);
+
+            const size_t frameCount = receivedBytes / sizeof(InnoMakerHostFrame);
+            for (size_t index = 0; index < frameCount; ++index)
             {
-                SetError("Received CAN frame has invalid DLC.");
-                return IM_ERR_IO;
+                InnoMakerHostFrame sdkFrame{};
+                std::memcpy(&sdkFrame,
+                    g_rxBuffer + index * sizeof(InnoMakerHostFrame),
+                    sizeof(InnoMakerHostFrame));
+                if (sdkFrame.echo_id != 0xFFFFFFFFu)
+                    continue;
+                if (sdkFrame.can_dlc > sizeof(frame->data))
+                    continue;
+
+                frame->id = sdkFrame.can_id & 0x1FFFFFFFu;
+                frame->dlc = sdkFrame.can_dlc;
+                frame->flags = 0;
+                if (sdkFrame.can_id & 0x80000000u)
+                    frame->flags = static_cast<uint8_t>(frame->flags | IM_FLAG_EXTENDED);
+                if (sdkFrame.can_id & 0x40000000u)
+                    frame->flags = static_cast<uint8_t>(frame->flags | IM_FLAG_RTR);
+                std::memcpy(frame->data, sdkFrame.data, frame->dlc);
+                if (frame->dlc < sizeof(frame->data))
+                    std::memset(frame->data + frame->dlc, 0, sizeof(frame->data) - frame->dlc);
+                SetError("");
+                return IM_OK;
             }
 
-            frame->id = sdkFrame->can_id & 0x1FFFFFFFu;
-            frame->dlc = sdkFrame->can_dlc;
-            frame->flags = 0;
-            if (sdkFrame->can_id & 0x80000000u)
-                frame->flags = static_cast<uint8_t>(frame->flags | IM_FLAG_EXTENDED);
-            if (sdkFrame->can_id & 0x40000000u)
-                frame->flags = static_cast<uint8_t>(frame->flags | IM_FLAG_RTR);
-            std::memcpy(frame->data, sdkFrame->data, frame->dlc);
-            if (frame->dlc < sizeof(frame->data))
-                std::memset(frame->data + frame->dlc, 0, sizeof(frame->data) - frame->dlc);
-            SetError("");
-            return IM_OK;
+            SetError("No bus RX frame found in the received SDK buffer.");
+            return IM_ERR_TIMEOUT;
         }
         if (!g_mockMode)
         {
