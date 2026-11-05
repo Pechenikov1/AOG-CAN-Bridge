@@ -221,7 +221,7 @@ extern "C" IM_API int IM_Receive(IM_CAN_FRAME* frame, int timeoutMs)
             static_assert(sizeof(InnoMakerHostFrame) == 24,
                 "InnoMaker host frame ABI must be 24 bytes");
 
-            const unsigned int sdkTimeoutMs = static_cast<unsigned int>(timeoutMs > 10 ? 10 : timeoutMs);
+            const unsigned int sdkTimeoutMs = (timeoutMs <= 0) ? 1 : static_cast<unsigned int>(timeoutMs > 10 ? 10 : timeoutMs);
             const auto receiveResult = g_sdk.recvInnoMakerDeviceBuf(g_device,
                 g_rxBuffer, sizeof(g_rxBuffer), sdkTimeoutMs);
             if (!receiveResult)
